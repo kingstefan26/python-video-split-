@@ -1,0 +1,8 @@
+*.mkv
+*.mp4
+*.opus
+*.webm
+*.avi
+out/
+!hoeEncode/test.mkv
+hoeEncode/__pycache__/
