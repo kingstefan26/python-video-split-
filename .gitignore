@@ -4,5 +4,7 @@
 *.webm
 *.avi
 out/
+temp/
+.idea/
 !hoeEncode/test.mkv
 hoeEncode/__pycache__/
