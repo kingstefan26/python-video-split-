@@ -3,8 +3,10 @@
 *.opus
 *.webm
 *.avi
+*.ivf
 out/
 temp/
+arkana/
 .idea/
 !hoeEncode/test.mkv
 hoeEncode/__pycache__/

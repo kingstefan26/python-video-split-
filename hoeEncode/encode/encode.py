@@ -109,7 +109,9 @@ def encodesvtav1(resolution='1080p', bitrate=-1, inpath='', outpath='', overwrit
     command_vec += ['-vsync', '0']
 
     command_vec += ['-svtav1-params',
-                    'tune=0:enable-overlays=1:scd=0:rc=0:film-grain=14:chroma-u-dc-qindex-offset=-2:chroma-u-ac-qindex-offset=-2:chroma-v-dc-qindex-offset=-2:chroma-v-ac-qindex-offset=-2']
+                    'tune=0:enable-overlays=1:scd=0:rc=0:film-grain=14:chroma-u-dc-qindex-offset=-2:chroma-u-ac'
+                    '-qindex-offset=-2:chroma-v-dc-qindex-offset=-2:chroma-v-ac-qindex-offset=-2 '
+                    ]
 
     # open gop
     command_vec += ['-g', '-1']
