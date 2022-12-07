@@ -3,46 +3,26 @@ import json
 import os
 import shutil
 import subprocess
+import time
+
+from copy import copy
 
 from scenedetect import detect, ContentDetector
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-DoubleEncode = True
+from hoeEncode.encode.FfmpegUtil import get_video_frame_rate
+
+MultiProcessEncode = True
 DebugMode = True
 
-
-def get_video_frame_rate(filename):
-    result = subprocess.run([
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        "-show_entries",
-        "stream=r_frame_rate",
-        filename,
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    result_string = result.stdout.decode('utf-8').split()[0].split('/')
-    fps = float(result_string[0]) / float(result_string[1])
-    return fps
-
-
-currnetPath = ""
-currentlyProcessingPaths = []
 
 finishedMerge = False
 
 
 def deleteCUrrentlyencoded():
     if not finishedMerge:
-        print('App quiting, deleting currently encoded scene. to resume just rerun the script with the same settings')
-
-        for path in currentlyProcessingPaths:
-            if os.path.exists(path):
-                os.remove(path)
+        print('App quiting, deleting currently encoded scenes. to resume just rerun the script with the same settings')
 
 
 atexit.register(deleteCUrrentlyencoded)
@@ -92,42 +72,26 @@ def getVideoSceneList(filePath, sceneCacheFileName):
     return fragemts
 
 
-def genformat(format_canon_name):
-    outcommandvec = []
-    match format_canon_name:
+ResolutionCannonName = "720p"
+
+
+def getQualityPreset():
+    match ResolutionCannonName:
         case '360p':
-            outcommandvec += ['-vf', 'scale=-2:360']
-            outcommandvec += ['-b:v', '100k']
-            outcommandvec += ['-maxrate', '200k']
-            outcommandvec += ['-bufsize', '400k']
+            return '-vf scale=-2:360'
         case '480p':
-            outcommandvec += ['-vf', 'scale=-2:468']
-            outcommandvec += ['-b:v', '200k']
-            outcommandvec += ['-maxrate', '400k']
-            outcommandvec += ['-bufsize', '800k']
+            return '-vf scale=-2:468'
         case '720p':
-            outcommandvec += ['-vf', 'scale=-2:720']
-            outcommandvec += ['-b:v', '250k']
-            outcommandvec += ['-maxrate', '1000k']
-            outcommandvec += ['-bufsize', '2000k']
+            return '-vf scale=-2:720'
         case '1080p':
-            outcommandvec += ['-vf', 'scale=-2:1080']
-            outcommandvec += ['-b:v', '500k']
-            outcommandvec += ['-maxrate', '2000k']
-            outcommandvec += ['-bufsize', '4000k']
-        case '1080p_crf':
-            outcommandvec += ['-vf', 'scale=-2:1080']
-            outcommandvec += ['-maxrate', '4000k']
-            outcommandvec += ['-crf', '25']
-        case 'sourse':
-            outcommandvec += ['-maxrate', '6500k']
-            outcommandvec += ['-crf', '20']
-
-    return outcommandvec
+            return '-vf scale=-2:1080'
+    return ''
 
 
-def encodeVideo(inputpath, outputfilepath, format='1080p', chanellmapping=[],
-                ffmpegpath='/home/kokoniara/ffmpeg_sources/ffmpeg/ffmpeg', preset='4'):
+def encodeSvtAv1(inputpath, outputfilepath, format='1080p', chanellmapping=None,
+                 ffmpegpath='/home/kokoniara/ffmpeg_sources/ffmpeg/ffmpeg', preset='4'):
+    if chanellmapping is None:
+        chanellmapping = []
     command_vec = [ffmpegpath]
 
     if DebugMode:
@@ -140,7 +104,7 @@ def encodeVideo(inputpath, outputfilepath, format='1080p', chanellmapping=[],
 
     command_vec += ['-preset', preset]
 
-    command_vec += genformat(format)
+    command_vec += getQualityPreset(format)
 
     command_vec += ['-vsync', '0']
 
@@ -159,15 +123,10 @@ def encodeVideo(inputpath, outputfilepath, format='1080p', chanellmapping=[],
     else:
         command_vec.append(outputfilepath)
 
-        global currentlyProcessingPaths
-        currentlyProcessingPaths.append(outputfilepath)
-
         if DebugMode:
             subprocess.run(command_vec)
         else:
             subprocess.run(command_vec, stdout=open(os.devnull, 'wb'))
-
-        currentlyProcessingPaths.remove(outputfilepath)
 
 
 def syscmd(cmd, encoding=''):
@@ -188,151 +147,164 @@ def syscmd(cmd, encoding=''):
     return p.returncode
 
 
-def extractLosslessChunk(start, end, inputpath, outpath):
-    command_vec = ['ffmpeg']
-
-    if DebugMode:
-        command_vec += ['-v', 'error']
-        command_vec.append('-y')
+def extractLosslessFast(start_time, end_time, inputpath, outpath):
+    if os.path.exists(outpath):
+        return
     else:
-        command_vec.append('-n')
+        endThingy = (float(end_time) / framerate)
+        startTime = (float(start_time) / framerate)
+        duration = (endThingy - startTime)
+        yas = f'ffmpeg -v error -nostdin -y -ss {str(startTime)} -i "{inputpath}" -t {str(duration)} -c:v ffv1 -threads 12 -an -sn {outpath}'
+        syscmd(yas)
 
-    command_vec += ['-i', inputpath]
 
-    command_vec += ['-vf', 'trim=start_frame=' + str(start) + ':end_frame=' + str(end)]
 
-    command_vec += ['-c:v', 'ffv1']
+AomLavishPath = "~/dev/aom-av1-lavish/aom_build/aomenc"
 
-    command_vec += ['-threads', '12']
+# 0=q 1=vbr 2=cq
+BitRateDistribution = 2
 
-    command_vec += ['-an', '-sn']
+CqLevel = 26
+VbrBitRate = 1000
 
-    command_vec += ['-copyts', '-avoid_negative_ts', '1']
+encodeForMobile = False
+isAnime = False
+TwoPass = True
 
-    offsetFromStart = (start - 1) / get_video_frame_rate(inputfile)
+# AOM EXCLUSIVE SETTINGS
 
-    command_vec += ['-ss', str(offsetFromStart)]
+UseFastLavis = True
 
-    command_vec += ['-map_metadata', '-1']
+UsePhotonNoise = True
+GrainSynthTablePath = "/home/kokoniara/dev/VideoSplit/Photon-Noise-Tables-aomenc-repo/1920x1080/1920x1080-SRGB-ISO" \
+                      "-Photon/1920x1080-SRGB-ISO400.tbl "
+denoiseLevel = 13
 
-    command_vec += [outpath]
+MinimumQuantizer = True
+MinimumQuantizerLvl = 50  # 0-63
 
-    global currentlyProcessingPaths
 
-    currentlyProcessingPaths.append(outpath)
 
-    if DebugMode:
-        subprocess.run(command_vec)
+def encodeAomEnc(inpath="", outpath="", start_time="", end_time=""):
+    endThingy = (float(end_time) / framerate)
+    startTime = (float(start_time) / framerate)
+    duration = (endThingy - startTime)
+    extractCommand = f'ffmpeg -v error -nostdin -ss {str(startTime)} -i "{inpath}" -t {str(duration)} -an -sn -strict -1 {getQualityPreset()} -f yuv4mpegpipe - '
+
+    print(extractCommand)
+    quit()
+    # encodeCommand = f'ffmpeg -v error -nostdin -ss {str(startTime)} -i "{inpath}" -t {str(duration)} -an -sn -strict -1 -f yuv4mpegpipe - | {AomLavishPath} - --ivf -o "{outpath}" --cpu-used=4 --tune=lavish_vmaf_rd --bit-depth=10 --lag-in-frames=64 --enable-fwd-kf=1 --disable-kf --aq-mode=1 --deltaq-mode=0 --enable-chroma-deltaq=1 --quant-b-adapt=1 --enable-qm=1 --min-q=1 --enable-keyframe-filtering=1 --arnr-strength=1 --arnr-maxframes=7 --quant-sharpness=3 --vmaf-resize-factor=1 --vmaf-preprocessing=1 --threads=1 --tune-content=psy'
+    encodeCommand = extractCommand + f'| {AomLavishPath} - --ivf -o "{outpath}" --cpu-used=3 --bit-depth=10 --threads=2 --disable-kf ' \
+                    f'--lag-in-frames=64 ' \
+                    f'--enable-fwd-kf=1 ' \
+                    f'--kf-min-dist=200 ' \
+                    f'--aq-mode=1 ' \
+                    f'--deltaq-mode=2 ' \
+                    f'--enable-chroma-deltaq=1 ' \
+                    f'--quant-b-adapt=1 ' \
+                    f'--enable-qm=1 ' \
+                    f'--min-q=1 ' \
+                    f'--enable-keyframe-filtering=2 ' \
+                    f'--tune-content=psy ' \
+                    f'--disable-trellis-quant=0 ' \
+                    f'--arnr-maxframes=7 ' \
+                    f'--arnr-strength=1 ' \
+                    f'--vmaf-model-path="vmaf_v0.6.1neg.json" ' \
+                    f'--vmaf-resize-factor=1 ' \
+                    f'--enable-cdef=1 ' \
+                    f'--vmaf-preprocessing=1 ' \
+                    # f'--loopfilter-sharpness=1 ' \
+                    # f'--quant-sharpness=4 ' \
+                    # f'--sharpness=1 ' \
+                    # f'--vmaf-model-path="vmaf_v0.6.1neg-nomotion.json" ' \
+                    # f'--vmaf-quantization=1 ' \
+                    # f'--ssim-rd-mult=150 ' \
+                    # f'--vmaf-motion-mult=200 '
+
+    if UseFastLavis:
+        # encodeCommand += ' --tune=lavish_fast'
+        encodeCommand += ' --tune=vmaf_psy_qp'
     else:
-        subprocess.run(command_vec, stdout=open(os.devnull, 'wb'))
+        encodeCommand += ' --tune=lavish_vmaf_rd'
 
-    currentlyProcessingPaths.remove(outpath)
+    if BitRateDistribution == 1:
+        encodeCommand += f" --end-usage=vbr --target-bitrate={VbrBitRate}"
+    elif BitRateDistribution == 2:
+        encodeCommand += f" --end-usage=cq --cq-level={CqLevel} --target-bitrate={VbrBitRate} "
+    else:
+        encodeCommand += f" --end-usage=q --cq-level={CqLevel}"
 
-    return outpath
+    if MinimumQuantizer:
+        encodeCommand += f" --max-q={MinimumQuantizerLvl}"
 
+    if UsePhotonNoise:
+        encodeCommand += f' --enable-dnl-denoising=0 --film-grain-table="{GrainSynthTablePath}"'
+    else:
+        encodeCommand += f' --enable-dnl-denoising=0 --denoise-noise-level={denoiseLevel}'
 
-isAnimation = True
-isHighMotion = True
-encodeForMobile = True
+    # Start the performance counter
+    start = time.perf_counter()
 
+    if TwoPass:
+        encodeCommand += f' --fpf="{outpath}.log"'
+        encodeCommand += " --passes=2"
 
-def encodeAomEnc(inpath="", outpath=""):
-    # ffmpeg -i "2022-10-09 04-19-30.mkv" -sn -an -vsync 0 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - -p 1 --webm -o test7.webm --bit-depth=10 --cpu-used=3 --cq-level=30 --disable-kf --kf-min-dist=12 --kf-max-dist=240 --enable-dnl-denoising=0 --denoise-noise-level=4 --color-primaries=bt709 --transfer-characteristics=bt709 --matrix-coefficients=bt709 --threads=64 --tile-rows=0 --tile-columns=1 --enable-keyframe-filtering=1 --aq-mode=0 --tune-content=psy --tune=omni --enable-qm=1 --lag-in-frames=64 --quant-sharpness=3 --sharpness=3 --luma-bias=1 --deltaq-mode=2 --arnr-maxframes=3 --arnr-strength=1  --quant-b-adapt=1 --loopfilter-sharpness=5
-    global currentlyProcessingPaths
-    currentlyProcessingPaths.append(outpath)
+        pass1 = copy(encodeCommand)
+        pass1 += " --pass=1"
+        # print(syscmd(pass1, encoding='utf8'))
 
-    # one pass
-    # yes = 'ffmpeg -v error -i "' + inpath + '" -strict -1 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - -p 1 --ivf -o "' + outpath + '" --bit-depth=10 --cpu-used=3 --cq-level=26 --disable-kf --kf-min-dist=12 --kf-max-dist=240 --enable-dnl-denoising=0 --denoise-noise-level=6 --color-primaries=bt709 --transfer-characteristics=bt709 --matrix-coefficients=bt709 --threads=8 --tile-rows=1 --tile-columns=2 --enable-keyframe-filtering=1 --aq-mode=0 --tune-content=psy --tune=omni --enable-qm=1 --lag-in-frames=64 --quant-sharpness=3 --sharpness=3 --luma-bias=1 --deltaq-mode=2 --arnr-maxframes=3 --arnr-strength=1  --quant-b-adapt=1 --loopfilter-sharpness=5  --enable-fwd-kf=1 --enable-chroma-deltaq=1  --mv-cost-upd-freq=2'
-    # syscmd(yes)
+        syscmd(pass1)
 
-    indeeddotcom = 'ffmpeg -v error -i "' + inpath + '" -strict -1 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - --ivf -o "' + outpath + '" --cpu-used=4 --passes=2 --pass=1 --end-usage=vbr --target-bitrate=1000 --bit-depth=10 --fpf="' + outpath + '.log" --lag-in-frames=48 --enable-fwd-kf=1 --aq-mode=1 --deltaq-mode=0 --enable-chroma-deltaq=1 --quant-b-adapt=1 --enable-qm=1 --min-q=1 --enable-keyframe-filtering=0 --arnr-strength=1 --arnr-maxframes=4 --sharpness=3 --enable-dnl-denoising=0 –denoise-noise-level=2 --disable-trellis-quant=0 --threads=16 --tune-content=animation'
-    indeeddotcom1 = 'ffmpeg -v error -i "' + inpath + '" -strict -1 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - --ivf -o "' + outpath + '" --cpu-used=4 --passes=2 --pass=2 --end-usage=vbr --target-bitrate=1000 --bit-depth=10 --fpf="' + outpath + '.log" --lag-in-frames=48 --enable-fwd-kf=1 --aq-mode=1 --deltaq-mode=0 --enable-chroma-deltaq=1 --quant-b-adapt=1 --enable-qm=1 --min-q=1 --enable-keyframe-filtering=0 --arnr-strength=1 --arnr-maxframes=4 --sharpness=3 --enable-dnl-denoising=0 –denoise-noise-level=2 --disable-trellis-quant=0 --threads=16 --tune-content=animation'
+        pass2 = copy(encodeCommand)
+        pass2 += " --pass=2"
+        syscmd(pass2)
 
-    syscmd(indeeddotcom)
-    syscmd(indeeddotcom1)
+        os.remove(outpath + '.log')
 
-    os.remove(outpath + ".log")
+    else:
+        encodeCommand += " --pass=1"
 
-    currentlyProcessingPaths.remove(outpath)
+        syscmd(encodeCommand)
+
+    # Stop the performance counter
+    end = time.perf_counter()
+
+    # Calculate the elapsed time in seconds
+    elapsed_time = end - start
+
+    # Print the elapsed time in seconds
+    print(f'Chunk {os.path.basename(outpath)} took {elapsed_time} seconds to run')
 
 
 def processSingle(tpl):
     global encodedScenes
     frag, i = tpl
 
+    # if i != 1238:
+    #     return
+
     encodedScenePath = tempfolder + str(i) + ('.ivf' if useAom else '.mkv')
 
     if os.path.exists(encodedScenePath):
         encodedScenes.append(encodedScenePath)
         return
-
-    losslessscenepath = tempfolder + 'losslesschnk' + str(i) + '.mkv'
-    if not os.path.exists(losslessscenepath):
-        sceneStartTimestamp = frag[0]
-        sceneEndTimestamp = frag[1]
-        extractLosslessChunk(sceneStartTimestamp, sceneEndTimestamp, inputfile, losslessscenepath)
 
     if useAom:
-        encodeAomEnc(inpath=losslessscenepath, outpath=encodedScenePath)
-    else:
-        encodeVideo(inputpath=losslessscenepath, outputfilepath=encodedScenePath, format='360p')
+        encodeAomEnc(inpath=inputfile, outpath=encodedScenePath, start_time=frag[0], end_time=frag[1])
+    # else:
+    #     encodeSvtAv1(inpath=inputfile, outpath=encodedScenePath, start_time=frag[0], end_time=frag[1], format='360p')
 
     encodedScenes.append(encodedScenePath)
-
-    os.remove(losslessscenepath)
-
-
-def processSingleWithoutExtractingLossless(tpl):
-    global encodedScenes
-    frag, i = tpl
-
-    encodedScenePath = tempfolder + str(i) + ('.ivf' if useAom else '.mkv')
-
-    if os.path.exists(encodedScenePath):
-        encodedScenes.append(encodedScenePath)
-        return
-
-    sceneStartTimestamp = frag[0]
-    sceneEndTimestamp = frag[1]
-
-    offsetFromStart = (sceneStartTimestamp - 1) / get_video_frame_rate(inputfile)
-
-    global currentlyProcessingPaths
-
-    currentlyProcessingPaths.append(encodedScenePath)
-
-    booking_dot_com = 'ffmpeg -v error -i "' + inputfile + '"  -vf trim=start_frame=' + str(
-        sceneStartTimestamp) + ':end_frame=' + str(
-        sceneEndTimestamp) + ' -an -sn -copyts -avoid_negative_ts 1 -map_metadata -1  -ss ' + str(
-        offsetFromStart) + ' -strict -1 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - --ivf -o "' + encodedScenePath + '" --cpu-used=4 --passes=2 ' \
-                                                                                                                                     '--pass=1' \
-                                                                                                                                     ' --end-usage=vbr --target-bitrate=1000 --bit-depth=10 --fpf="' + encodedScenePath + '.log" --lag-in-frames=48 --enable-fwd-kf=1 --aq-mode=1 --deltaq-mode=0 --enable-chroma-deltaq=1 --quant-b-adapt=1 --enable-qm=1 --min-q=1 --enable-keyframe-filtering=0 --arnr-strength=1 --arnr-maxframes=4 --sharpness=3 --enable-dnl-denoising=0 –denoise-noise-level=2 --disable-trellis-quant=0 --threads=16 --tune-content=animation'
-    indeeddotcom1 = 'ffmpeg -v error -i "' + inputfile + '"  -vf trim=start_frame=' + str(
-        sceneStartTimestamp) + ':end_frame=' + str(
-        sceneEndTimestamp) + ' -an -sn -copyts -avoid_negative_ts 1 -map_metadata -1  -ss ' + str(
-        offsetFromStart) + ' -strict -1 -f yuv4mpegpipe - | ~/dev/aom-av1-lavish/aom_build/aomenc - --ivf -o "' + encodedScenePath + '" --cpu-used=4 --passes=2 ' \
-                                                                                                                                     '--pass=2' \
-                                                                                                                                     ' --end-usage=vbr --target-bitrate=1000 --bit-depth=10 --fpf="' + encodedScenePath + '.log" --lag-in-frames=48 --enable-fwd-kf=1 --aq-mode=1 --deltaq-mode=0 --enable-chroma-deltaq=1 --quant-b-adapt=1 --enable-qm=1 --min-q=1 --enable-keyframe-filtering=0 --arnr-strength=1 --arnr-maxframes=4 --sharpness=3 --enable-dnl-denoising=0 –denoise-noise-level=2 --disable-trellis-quant=0 --threads=16 --tune-content=animation'
-
-    syscmd(booking_dot_com)
-    syscmd(indeeddotcom1)
-
-    os.remove(encodedScenePath + ".log")
-
-    currentlyProcessingPaths.remove(encodedScenePath)
-
-    encodedScenes.append(encodedScenePath)
-
-    os.remove(losslessscenepath)
 
 
 useAom = True
+NumberOfWorkers = 3
 
 if __name__ == "__main__":
-    inputfile = '/mnt/sda1/movies/The.Quintessential.Quintuplets.Movie.2022.JAPANESE.1080p.AMZN.WEBRip.DDP5.1.x264-NOGRP/The.Quintessential.Quintuplets.Movie.2022.JAPANESE.1080p.AMZN.WEBRip.DDP5.1.x264-NOGRP.mkv'
+    inputfile = '/mnt/sda1/Coraline.2009.BDRemux 1080p.mkv'
     tempfolder = 'temp/'
     sceneCacheFileName = tempfolder + 'sceneCache.json'
-    output = 'hentai.mkv'
+    output = 'coraline.mkv'
 
     if os.path.exists(output):
         print('Output %s already exists' % output)
@@ -341,20 +313,31 @@ if __name__ == "__main__":
 
     if not os.path.exists(tempfolder):
         os.mkdir(tempfolder)
+    else:
+        # syscmd('for i in ./temp/*.ivf; ffmpeg -v error -i $i -c copy -f null -; if [ $status != "0" ]; echo "File $i is invalid deleting"; rm "$i"; end; end')
+        syscmd(f'rm {tempfolder}*.log')
+        syscmd(f'rm {tempfolder}*.mkv')
 
-    fragments = getVideoSceneList(inputfile, sceneCacheFileName)
+    framerate = get_video_frame_rate(inputfile)
 
     encodedScenes = []
 
-    if DoubleEncode:
+    if MultiProcessEncode:
+        fragments = getVideoSceneList(inputfile, sceneCacheFileName)
         jobs = []
 
         for i, frag in enumerate(fragments):
             jobs.append((frag, i))
-
-        r = process_map(processSingle, jobs, max_workers=2, chunksize=1)
+        print(f'Encoding Scenes using {NumberOfWorkers} workers')
+        processMap = process_map(processSingle,
+                                 jobs,
+                                 max_workers=NumberOfWorkers,
+                                 chunksize=1,
+                                 desc='Encoding Scenes',
+                                 unit="scene")
 
     else:
+        fragments = getVideoSceneList(inputfile, sceneCacheFileName)
         for i, frag in enumerate(tqdm(fragments, total=len(fragments), desc='Encoding Scenes', unit='scene')):
             sceneStartTimestamp = frag[0]
             sceneEndTimestamp = frag[1]
@@ -362,26 +345,18 @@ if __name__ == "__main__":
             encodedScenePath = tempfolder + str(i) + ('.ivf' if useAom else '.mkv')
 
             if not os.path.exists(encodedScenePath):
-
-                losslessscenepath = tempfolder + 'losslesschnk' + str(i) + '.mkv'
-                if not os.path.exists(losslessscenepath):
-                    extractLosslessChunk(sceneStartTimestamp, sceneEndTimestamp, inputfile, losslessscenepath)
-
                 if useAom:
-                    encodeAomEnc(inpath=losslessscenepath, outpath=encodedScenePath)
-                else:
-                    encodeVideo(inputpath=losslessscenepath, outputfilepath=encodedScenePath, format='360p')
-
-                os.remove(losslessscenepath)
-
-                encodedScenes.append(encodedScenePath)
+                    encodeAomEnc(inpath=inputfile, outpath=encodedScenePath, start_time=sceneStartTimestamp,
+                                 end_time=sceneEndTimestamp)
+                # else:
+                #     encodeSvtAv1(inpath=inputfile, outpath=encodedScenePath, start_time=sceneStartTimestamp, end_time=sceneEndTimestamp, format='360p')
 
             else:
+                tqdm.write('Chunk ' + encodedScenePath + ' already exists skipping')
 
-                encodedScenes.append(encodedScenePath)
-                tqdm.write('File ' + encodedScenePath + ' already exists skipping')
-                continue
+            encodedScenes.append(encodedScenePath)
 
+    quit()
     print('Encoding finished, merging Scenes')
     mergeVideoFiles(encodedScenes, output)
 
